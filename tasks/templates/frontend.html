@@ -1,0 +1,196 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Smart Task Analyzer</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <style>
+    :root{--bg:#f7f9fb;--card:#fff;--muted:#666}
+    body{font-family:Inter,system-ui,Arial;background:var(--bg);margin:0;padding:20px}
+    .container{max-width:1100px;margin:0 auto;display:grid;grid-template-columns:1fr 1fr;gap:18px}
+    .panel{background:var(--card);padding:18px;border-radius:10px;box-shadow:0 6px 18px rgba(14,22,32,0.06)}
+    h1{margin:0 0 10px}
+    label{display:block;margin-top:8px;font-size:14px;color:var(--muted)}
+    input[type="text"], input[type="number"], input[type="date"], textarea, select{width:100%;padding:10px;border:1px solid #e3e8ee;border-radius:6px;margin-top:6px;box-sizing:border-box}
+    textarea{min-height:90px}
+    .row{display:flex;gap:10px}
+    .btn{background:#1976d2;color:#fff;padding:10px 14px;border-radius:8px;border:none;cursor:pointer;margin-top:10px}
+    .task{border-top:1px solid #eef2f6;padding:12px 0;display:flex;justify-content:space-between;align-items:flex-start}
+    .badge{padding:6px 8px;border-radius:6px;color:white;font-weight:600}
+    .badge.high{background:#e53935}
+    .badge.med{background:#fb8c00}
+    .badge.low{background:#43a047}
+    .explain{font-size:13px;color:#333;margin-top:6px}
+    .small{font-size:13px;color:var(--muted)}
+    .suggestions ul{list-style:none;padding:0;margin:0}
+    .suggestions li{padding:12px;border-bottom:1px solid #f0f3f6}
+    @media (max-width:900px){.container{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+  <div style="max-width:1100px;margin:0 auto;">
+    <h1>Smart Task Analyzer</h1>
+    <div class="container">
+      <div class="panel" id="inputPanel">
+        <h3>Input Tasks</h3>
+        <label>Title</label>
+        <input id="title" type="text" placeholder="Fix login bug"/>
+        <div class="row">
+          <div style="flex:1">
+            <label>Due date</label>
+            <input id="due" type="date"/>
+          </div>
+          <div style="flex:1">
+            <label>Estimated hours</label>
+            <input id="hours" type="number" min="0" step="0.5"/>
+          </div>
+        </div>
+        <label>Importance (1-10)</label>
+        <input id="importance" type="number" min="1" max="10" value="5"/>
+        <label>Dependencies (comma-separated IDs)</label>
+        <input id="deps" type="text" placeholder="t1,t2"/>
+        <label style="margin-top:12px">Or paste JSON array of tasks</label>
+        <textarea id="bulkJson" placeholder='[{"id":"t1","title":"Fix login","due_date":"2025-11-30","estimated_hours":3,"importance":8,"dependencies":[]}]'></textarea>
+        <label>Strategy</label>
+        <select id="strategy">
+          <option value="smart">Smart Balance</option>
+          <option value="fastest">Fastest Wins</option>
+          <option value="impact">High Impact</option>
+          <option value="deadline">Deadline Driven</option>
+        </select>
+        <button class="btn" id="analyzeBtn">Analyze Tasks</button>
+        <div id="inputMsg" class="small"></div>
+      </div>
+
+      <div class="panel" id="outputPanel">
+        <h3>Analysis — Results</h3>
+        <div id="loading" style="display:none">Loading...</div>
+        <div id="results"></div>
+      </div>
+
+      <div class="panel suggestions" style="grid-column:1 / -1;margin-top:10px">
+        <h3>Suggestions for Today (Top 3)</h3>
+        <div style="display:flex;gap:12px;align-items:center">
+          <small class="small">Suggestion strategy</small>
+          <select id="suggestStrategy"><option value="smart">Smart Balance</option><option value="fastest">Fastest Wins</option><option value="impact">High Impact</option><option value="deadline">Deadline Driven</option></select>
+          <button class="btn" id="suggestBtn" style="background:#388e3c">Get Suggestions</button>
+        </div>
+        <div id="suggestionList" style="margin-top:12px"></div>
+      </div>
+    </div>
+  </div>
+
+<script>
+const API_BASE = ''; // stays empty when served from same origin (Django view at /)
+
+function showMessage(msg, elId='inputMsg'){document.getElementById(elId).innerText = msg;}
+function colorForPriority(p){
+  if(p === 'High') return 'high';
+  if(p === 'Medium') return 'med';
+  return 'low';
+}
+function renderResults(tasks){
+  const out = document.getElementById('results');
+  out.innerHTML = '';
+  if(!tasks || tasks.length===0){out.innerHTML='<div class="small">No tasks analyzed yet.</div>'; return;}
+  tasks.forEach(t=>{
+    const div = document.createElement('div');
+    div.className = 'task';
+    const left = document.createElement('div');
+    left.style.flex='1';
+    left.innerHTML = `<strong>${t.title}</strong>
+      <div class="small">Due: ${t.due_date || '—'} &nbsp; • &nbsp; Effort: ${t.estimated_hours || '—'}h &nbsp; • &nbsp; Importance: ${t.importance}</div>
+      <div class="explain">${t.explanation}</div>`;
+    const right = document.createElement('div');
+    const badge = document.createElement('div');
+    badge.className = 'badge ' + colorForPriority(t.priority);
+    badge.innerText = t.score;
+    right.appendChild(badge);
+    div.appendChild(left);
+    div.appendChild(right);
+    out.appendChild(div);
+  });
+}
+
+async function analyzeTasks(){
+  showMessage('');
+  let tasks = [];
+  const bulk = document.getElementById('bulkJson').value.trim();
+  if(bulk){
+    try{
+      const arr = JSON.parse(bulk);
+      if(!Array.isArray(arr)){ showMessage('Bulk JSON must be an array'); return; }
+      tasks = arr;
+    }catch(e){ showMessage('Invalid JSON in bulk input'); return; }
+  }else{
+    const title = document.getElementById('title').value.trim();
+    if(!title){ showMessage('Please provide a title or paste tasks JSON'); return; }
+    const t = {
+      id: 't' + Math.floor(Math.random()*100000),
+      title,
+      due_date: document.getElementById('due').value || null,
+      estimated_hours: document.getElementById('hours').value || null,
+      importance: document.getElementById('importance').value || 5,
+      dependencies: (document.getElementById('deps').value||'').split(',').map(x=>x.trim()).filter(Boolean)
+    };
+    tasks.push(t);
+  }
+  const strategy = document.getElementById('strategy').value;
+  document.getElementById('loading').style.display='block';
+  try{
+    const resp = await fetch(`${API_BASE}/api/tasks/analyze/`, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({tasks, strategy})
+    });
+    const data = await resp.json();
+    document.getElementById('loading').style.display='none';
+    if(resp.ok){
+      renderResults(data.tasks);
+      showMessage(`Analyzed ${data.tasks.length} tasks. Strategy: ${data.strategy}`);
+    } else {
+      showMessage(JSON.stringify(data));
+    }
+  }catch(err){
+    document.getElementById('loading').style.display='none';
+    showMessage('Network error: ' + err.message);
+  }
+}
+
+async function getSuggestions(){
+  const bulk = document.getElementById('bulkJson').value.trim();
+  let tasks = [];
+  if(bulk){
+    try{ tasks = JSON.parse(bulk); }catch(e){ showMessage('Invalid JSON in bulk input'); return; }
+  } else {
+    showMessage('Provide tasks (either form fields or paste JSON) to get suggestions');
+    return;
+  }
+  const strategy = document.getElementById('suggestStrategy').value;
+  const query = encodeURIComponent(JSON.stringify(tasks));
+  try{
+    const resp = await fetch(`${API_BASE}/api/tasks/suggest/?tasks=${query}&strategy=${strategy}`);
+    const data = await resp.json();
+    const box = document.getElementById('suggestionList');
+    box.innerHTML = '';
+    if(data.suggestions && data.suggestions.length){
+      const ul = document.createElement('ul');
+      data.suggestions.forEach(s=>{
+        const li = document.createElement('li');
+        li.innerHTML = `<strong>${s.title}</strong><div class="small">${s.explanation}</div>`;
+        ul.appendChild(li);
+      });
+      box.appendChild(ul);
+    } else {
+      box.innerHTML = '<div class="small">No suggestions (provide tasks in JSON)</div>';
+    }
+  }catch(err){
+    showMessage('Network error: ' + err.message);
+  }
+}
+
+document.getElementById('analyzeBtn').addEventListener('click', analyzeTasks);
+document.getElementById('suggestBtn').addEventListener('click', getSuggestions);
+</script>
+</body>
+</html>
